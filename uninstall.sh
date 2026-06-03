@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN_DIR="${HOME}/.local/bin"
+ZSH_ENV="${HOME}/.zshenv"
+START="# >>> codex-smart-mode /smart >>>"
+END="# <<< codex-smart-mode /smart <<<"
+
+echo "Uninstalling codex-smart-mode..."
+rm -f "$BIN_DIR/codex-smart" "$BIN_DIR/csmart" "$BIN_DIR/codex-smart-uninstall"
+
+if [[ -f "$ZSH_ENV" ]]; then
+  python3 - "$ZSH_ENV" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+text = p.read_text()
+start = "# >>> codex-smart-mode /smart >>>"
+end = "# <<< codex-smart-mode /smart <<<"
+
+while start in text and end in text:
+    a = text.index(start)
+    b = text.index(end, a) + len(end)
+    if a > 0 and text[a - 1] == "\n":
+        a -= 1
+    text = text[:a] + text[b:]
+
+p.write_text(text)
+PY
+fi
+
+echo "Removed codex-smart, csmart, codex-smart-uninstall, and the managed /smart zsh block."

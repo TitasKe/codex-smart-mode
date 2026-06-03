@@ -3,15 +3,30 @@ set -euo pipefail
 
 CODEX_BIN="${CODEX_SMART_CODEX_BIN:-codex}"
 ROOT_DIR="$(pwd -P)"
+CONFIG_DIR="${CODEX_SMART_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/codex-smart}"
+USER_CONFIG="$CONFIG_DIR/config.env"
+PROJECT_CONFIG_NAME=".codex-smart.env"
 
-NANO_MODEL="${CODEX_SMART_NANO_MODEL:-gpt-5.4-mini}"
-LIGHT_MODEL="${CODEX_SMART_LIGHT_MODEL:-gpt-5.4-mini}"
-STANDARD_MODEL="${CODEX_SMART_STANDARD_MODEL:-gpt-5.5}"
-DEEP_MODEL="${CODEX_SMART_DEEP_MODEL:-gpt-5.5}"
-ARCHITECT_MODEL="${CODEX_SMART_ARCHITECT_MODEL:-gpt-5.5}"
+NANO_MODEL="gpt-5.4-mini"
+LIGHT_MODEL="gpt-5.4-mini"
+STANDARD_MODEL="gpt-5.5"
+DEEP_MODEL="gpt-5.5"
+ARCHITECT_MODEL="gpt-5.5"
+PLAN_SANDBOX_DEFAULT="read-only"
+IMPL_SANDBOX_DEFAULT="workspace-write"
+PLAN_APPROVAL_DEFAULT="never"
+IMPL_APPROVAL_DEFAULT="on-request"
+DEFAULT_TIER="standard"
+DEFAULT_NATURE="impl"
+EXTRA_PLAN_RE=""
+EXTRA_IMPL_RE=""
+EXTRA_DEEP_RE=""
+EXTRA_ARCHITECT_RE=""
+EXTRA_SEARCH_RE=""
 
 action="run"
 dry_run=0
+why=0
 tier="auto"
 nature="auto"
 model=""
@@ -20,6 +35,264 @@ sandbox=""
 approval=""
 search="auto"
 inject=1
+loaded_configs=()
+why_lines=()
+
+add_why() {
+  why_lines+=("$1")
+}
+
+set_config_value() {
+  local key="$1"
+  local value="$2"
+  case "$key" in
+    NANO_MODEL|CODEX_SMART_NANO_MODEL) NANO_MODEL="$value" ;;
+    LIGHT_MODEL|CODEX_SMART_LIGHT_MODEL) LIGHT_MODEL="$value" ;;
+    STANDARD_MODEL|CODEX_SMART_STANDARD_MODEL) STANDARD_MODEL="$value" ;;
+    DEEP_MODEL|CODEX_SMART_DEEP_MODEL) DEEP_MODEL="$value" ;;
+    ARCHITECT_MODEL|CODEX_SMART_ARCHITECT_MODEL) ARCHITECT_MODEL="$value" ;;
+    PLAN_SANDBOX) PLAN_SANDBOX_DEFAULT="$value" ;;
+    IMPL_SANDBOX) IMPL_SANDBOX_DEFAULT="$value" ;;
+    PLAN_APPROVAL) PLAN_APPROVAL_DEFAULT="$value" ;;
+    IMPL_APPROVAL) IMPL_APPROVAL_DEFAULT="$value" ;;
+    DEFAULT_TIER) DEFAULT_TIER="$value" ;;
+    DEFAULT_NATURE) DEFAULT_NATURE="$value" ;;
+    EXTRA_PLAN_RE) EXTRA_PLAN_RE="$value" ;;
+    EXTRA_IMPL_RE) EXTRA_IMPL_RE="$value" ;;
+    EXTRA_DEEP_RE) EXTRA_DEEP_RE="$value" ;;
+    EXTRA_ARCHITECT_RE) EXTRA_ARCHITECT_RE="$value" ;;
+    EXTRA_SEARCH_RE) EXTRA_SEARCH_RE="$value" ;;
+  esac
+}
+
+load_config_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  loaded_configs+=("$file")
+
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    [[ "$line" == *"="* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    [[ -n "$key" ]] && set_config_value "$key" "$value"
+  done < "$file"
+}
+
+apply_environment_overrides() {
+  if [[ -n "${CODEX_SMART_NANO_MODEL+x}" ]]; then NANO_MODEL="$CODEX_SMART_NANO_MODEL"; fi
+  if [[ -n "${CODEX_SMART_LIGHT_MODEL+x}" ]]; then LIGHT_MODEL="$CODEX_SMART_LIGHT_MODEL"; fi
+  if [[ -n "${CODEX_SMART_STANDARD_MODEL+x}" ]]; then STANDARD_MODEL="$CODEX_SMART_STANDARD_MODEL"; fi
+  if [[ -n "${CODEX_SMART_DEEP_MODEL+x}" ]]; then DEEP_MODEL="$CODEX_SMART_DEEP_MODEL"; fi
+  if [[ -n "${CODEX_SMART_ARCHITECT_MODEL+x}" ]]; then ARCHITECT_MODEL="$CODEX_SMART_ARCHITECT_MODEL"; fi
+}
+
+print_status() {
+  echo "codex-smart-mode"
+  echo "  launcher: ${BASH_SOURCE[0]}"
+  echo "  codex:    ${CODEX_BIN}"
+  echo "  config:   ${USER_CONFIG}"
+  echo
+  echo "Usage:"
+  echo "  /smart \"fix the failing tests\""
+  echo "  /smart --dry-run \"fix auth bug in production\""
+  echo "  /smart --why \"what is the latest Codex model?\""
+  echo "  /smart doctor"
+  echo "  /smart config init"
+}
+
+doctor_check() {
+  local label="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    echo "ok   $label"
+    return 0
+  fi
+  echo "fail $label"
+  return 1
+}
+
+run_doctor() {
+  local failed=0
+  echo "codex-smart doctor"
+  doctor_check "codex command is available" command -v "$CODEX_BIN" || failed=1
+  doctor_check "codex-smart shell syntax" bash -n "${BASH_SOURCE[0]}" || failed=1
+  if command -v csmart >/dev/null 2>&1; then
+    echo "ok   csmart is on PATH ($(command -v csmart))"
+  else
+    echo "warn csmart is not on PATH; run ./install.sh"
+  fi
+  if zsh -lc 'type /smart' >/dev/null 2>&1; then
+    echo "ok   /smart zsh function is available"
+  else
+    echo "warn /smart zsh function is not loaded; run ./install.sh"
+  fi
+  if [[ -f "$USER_CONFIG" ]]; then
+    echo "ok   user config exists: $USER_CONFIG"
+  else
+    echo "info user config not found; create one with: codex-smart config init"
+  fi
+  if "$CODEX_BIN" --version >/dev/null 2>&1; then
+    echo "ok   codex can report its version"
+  else
+    echo "warn codex --version failed"
+  fi
+  return "$failed"
+}
+
+config_usage() {
+  cat <<EOF
+Usage:
+  codex-smart config path
+  codex-smart config show
+  codex-smart config init
+
+User config: $USER_CONFIG
+Project config: ./$PROJECT_CONFIG_NAME
+EOF
+}
+
+config_init() {
+  mkdir -p "$CONFIG_DIR"
+  if [[ -f "$USER_CONFIG" ]]; then
+    echo "Config already exists: $USER_CONFIG"
+    return 0
+  fi
+  cat > "$USER_CONFIG" <<'EOF'
+# codex-smart-mode config
+# Project-level overrides can live in .codex-smart.env.
+
+NANO_MODEL=gpt-5.4-mini
+LIGHT_MODEL=gpt-5.4-mini
+STANDARD_MODEL=gpt-5.5
+DEEP_MODEL=gpt-5.5
+ARCHITECT_MODEL=gpt-5.5
+
+PLAN_SANDBOX=read-only
+IMPL_SANDBOX=workspace-write
+PLAN_APPROVAL=never
+IMPL_APPROVAL=on-request
+
+# Extra regex fragments. Keep them simple POSIX extended regex.
+EXTRA_PLAN_RE=
+EXTRA_IMPL_RE=
+EXTRA_DEEP_RE=
+EXTRA_ARCHITECT_RE=
+EXTRA_SEARCH_RE=
+EOF
+  echo "Created $USER_CONFIG"
+}
+
+run_config() {
+  local sub="${1:-}"
+  case "$sub" in
+    path) echo "$USER_CONFIG" ;;
+    show)
+      if [[ -f "$USER_CONFIG" ]]; then
+        sed -n '1,220p' "$USER_CONFIG"
+      else
+        echo "No config found at $USER_CONFIG"
+        echo "Create one with: codex-smart config init"
+      fi
+      ;;
+    init) config_init ;;
+    *) config_usage ;;
+  esac
+}
+
+run_models() {
+  if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
+    echo "codex command not found: $CODEX_BIN" >&2
+    return 1
+  fi
+  if command -v node >/dev/null 2>&1; then
+    "$CODEX_BIN" debug models | node -e '
+      let raw = "";
+      process.stdin.on("data", d => raw += d);
+      process.stdin.on("end", () => {
+        raw = raw.replace(/^WARNING:.*\n/gm, "");
+        const data = JSON.parse(raw);
+        for (const model of data.models || []) {
+          const levels = (model.supported_reasoning_levels || []).map(x => x.effort).join(",");
+          console.log(`${model.slug}\t${model.display_name || ""}\tdefault=${model.default_reasoning_level || ""}\tlevels=${levels}`);
+        }
+      });
+    '
+  else
+    "$CODEX_BIN" debug models
+  fi
+}
+
+run_release_check() {
+  local failed=0
+  local root
+  local p1 p2 p3 p4 p5 p6 p7 secret_re
+  root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+  p1="gh"; p1="${p1}o_"
+  p2="gh"; p2="${p2}p_"
+  p3="github"; p3="${p3}_pat_"
+  p4="sk"; p4="${p4}-[A-Za-z0-9]{20,}"
+  p5="OPENAI"; p5="${p5}_API_KEY="
+  p6="ANTHROPIC"; p6="${p6}_API_KEY="
+  p7="Authorization:"; p7="${p7} Bearer"
+  secret_re="$p1|$p2|$p3|$p4|$p5|$p6|$p7"
+  echo "codex-smart release-check"
+  echo "root=$root"
+
+  if [[ -f "$root/codex-smart" ]]; then
+    bash -n "$root/codex-smart" && echo "ok   codex-smart syntax" || failed=1
+  fi
+  if [[ -f "$root/install.sh" ]]; then
+    bash -n "$root/install.sh" && echo "ok   install.sh syntax" || failed=1
+  fi
+  if [[ -f "$root/uninstall.sh" ]]; then
+    bash -n "$root/uninstall.sh" && echo "ok   uninstall.sh syntax" || failed=1
+  fi
+  if rg -n "$secret_re" "$root" -g '!*.git/*'; then
+    echo "fail possible secret-looking text found"
+    failed=1
+  else
+    echo "ok   no obvious secret patterns"
+  fi
+  if git -C "$root" log --format='%an <%ae>' --all | rg -v 'TitasKe <97993783\+TitasKe@users\.noreply\.github\.com>' >/dev/null 2>&1; then
+    echo "warn git history contains author metadata outside the configured noreply identity"
+  else
+    echo "ok   git author metadata uses noreply identity"
+  fi
+  return "$failed"
+}
+
+run_uninstall() {
+  local bin_dir="${HOME}/.local/bin"
+  echo "Removing codex-smart-mode install..."
+  rm -f "$bin_dir/codex-smart" "$bin_dir/csmart" "$bin_dir/codex-smart-uninstall"
+  if [[ -f "$HOME/.zshenv" ]]; then
+    python3 - "$HOME/.zshenv" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+text = p.read_text()
+start = "# >>> codex-smart-mode /smart >>>"
+end = "# <<< codex-smart-mode /smart <<<"
+while start in text and end in text:
+    a = text.index(start)
+    b = text.index(end, a) + len(end)
+    if a > 0 and text[a - 1] == "\n":
+        a -= 1
+    text = text[:a] + text[b:]
+p.write_text(text)
+PY
+  fi
+  echo "Removed codex-smart, csmart, and the managed /smart zsh block."
+}
 
 usage() {
   cat <<'EOF'
@@ -29,12 +302,18 @@ Usage:
   codex-smart exec [options] "task prompt"
   codex-smart resume [options] [--last|SESSION_ID] ["task prompt"]
   codex-smart review [options] [codex review options] ["review prompt"]
+  codex-smart doctor
+  codex-smart config init|show|path
+  codex-smart models
+  codex-smart release-check
+  codex-smart uninstall
 
 Short alias after install:
   csmart [options] "task prompt"
 
 Options:
   --dry-run                         Show selected settings and command only.
+  --why                             Explain route selection and exit.
   --cd DIR                          Use DIR as the Codex workspace root.
   --tier auto|nano|light|standard|deep|architect
   --nature auto|plan|impl
@@ -68,6 +347,32 @@ EOF
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    doctor)
+      run_doctor
+      exit $?
+      ;;
+    status)
+      print_status
+      exit 0
+      ;;
+    config)
+      shift
+      run_config "$@"
+      exit $?
+      ;;
+    models)
+      shift
+      run_models "$@"
+      exit $?
+      ;;
+    release-check)
+      run_release_check
+      exit $?
+      ;;
+    uninstall)
+      run_uninstall
+      exit $?
+      ;;
     exec|e)
       action="exec"
       shift
@@ -88,6 +393,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --why)
+      why=1
       shift
       ;;
     --cd|-C)
@@ -151,10 +460,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+load_config_file "$USER_CONFIG"
+load_config_file "$ROOT_DIR/$PROJECT_CONFIG_NAME"
+apply_environment_overrides
+
 case "$tier" in
   auto|nano|light|standard|deep|architect) ;;
   *)
     echo "--tier must be auto, nano, light, standard, deep, or architect" >&2
+    exit 2
+    ;;
+esac
+
+case "$DEFAULT_TIER" in
+  nano|light|standard|deep|architect) ;;
+  *)
+    echo "DEFAULT_TIER in config must be nano, light, standard, deep, or architect" >&2
+    exit 2
+    ;;
+esac
+
+case "$DEFAULT_NATURE" in
+  plan|impl) ;;
+  *)
+    echo "DEFAULT_NATURE in config must be plan or impl" >&2
     exit 2
     ;;
 esac
@@ -212,6 +541,11 @@ elif [[ "$action" != "resume" && "$action" != "review" && ! -t 0 ]]; then
   prompt="$(cat)"
 fi
 
+if [[ -z "${prompt//[[:space:]]/}" && "$action" == "run" ]]; then
+  print_status
+  exit 0
+fi
+
 prompt_lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
 
 matches() {
@@ -220,53 +554,77 @@ matches() {
 
 PLAN_RE="(^|[^[:alnum:]_])(explain|review|audit|analy[sz]e|plan|design|document|docs|readme|compare|question|investigate|latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|lookup|browse|search|web)($|[^[:alnum:]_])|what does|what is|why does|how does|how do i|which model|summari[sz]e|look up"
 IMPL_RE="(^|[^[:alnum:]_])(fix|implement|add|change|update|wire|create|build|run|start|test|debug|migrate|deploy|install|package|refactor)($|[^[:alnum:]_])|write code|do that|make it"
+DEEP_RE="(hard|complex|fragile|flaky|race|concurrency|security|vulnerab|credential|secret|token|session|auth|login|production|deploy|docker|kubernetes|helm|browser|playwright|automation|supplier|checkout|billing|stripe|database|migration)"
+ARCHITECT_RE="(architecture|architect|system design|design the system|large refactor|new subsystem|platform|strategy|rfc|migration plan|refactor plan)"
+SEARCH_RE="(latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|docs|documentation|api|openai|stripe|law|regulation|look up|lookup|browse|search|web)"
+
+[[ -n "$EXTRA_PLAN_RE" ]] && PLAN_RE="$PLAN_RE|$EXTRA_PLAN_RE"
+[[ -n "$EXTRA_IMPL_RE" ]] && IMPL_RE="$IMPL_RE|$EXTRA_IMPL_RE"
+[[ -n "$EXTRA_DEEP_RE" ]] && DEEP_RE="$DEEP_RE|$EXTRA_DEEP_RE"
+[[ -n "$EXTRA_ARCHITECT_RE" ]] && ARCHITECT_RE="$ARCHITECT_RE|$EXTRA_ARCHITECT_RE"
+[[ -n "$EXTRA_SEARCH_RE" ]] && SEARCH_RE="$SEARCH_RE|$EXTRA_SEARCH_RE"
 
 selected_nature="$nature"
 if [[ "$selected_nature" == "auto" ]]; then
-  selected_nature="impl"
+  selected_nature="$DEFAULT_NATURE"
+  add_why "nature default: $selected_nature"
 
   if [[ "$action" == "review" ]]; then
     selected_nature="plan"
+    add_why "nature=plan because action=review"
   fi
 
   if matches "$PLAN_RE" && ! matches "$IMPL_RE"; then
     selected_nature="plan"
+    add_why "nature=plan because prompt matched plan signals"
   fi
 
   if matches "$IMPL_RE"; then
     selected_nature="impl"
+    add_why "nature=impl because prompt matched implementation signals"
   fi
+else
+  add_why "nature forced by CLI: $selected_nature"
 fi
 
 selected_tier="$tier"
 if [[ "$selected_tier" == "auto" ]]; then
-  selected_tier="standard"
+  selected_tier="$DEFAULT_TIER"
+  add_why "tier default: $selected_tier"
 
   if [[ "$action" == "review" ]]; then
     selected_tier="deep"
+    add_why "tier=deep because action=review"
   fi
 
   if matches "(typo|spelling|format|rename|wording|copy text|one-line|one line|simple|quick|trivial)" \
     && ! matches "(multi-file|multiple files|architecture|security|deploy|production|auth|billing|stripe|database|migration)"; then
     selected_tier="nano"
+    add_why "tier=nano because prompt matched trivial/small-edit signals"
   fi
 
   if matches "(small|single-file|single file|explain a function|one file)" \
     && ! matches "(architecture|security|deploy|production|auth|billing|stripe|database|migration|complex|hard)"; then
     selected_tier="light"
+    add_why "tier=light because prompt matched small/single-file signals"
   fi
 
-  if matches "(hard|complex|fragile|flaky|race|concurrency|security|vulnerab|credential|secret|token|session|auth|login|production|deploy|docker|kubernetes|helm|browser|playwright|automation|supplier|checkout|billing|stripe|database|migration)"; then
+  if matches "$DEEP_RE"; then
     selected_tier="deep"
+    add_why "tier=deep because prompt matched high-risk/deep-work signals"
   fi
 
-  if matches "(architecture|architect|system design|design the system|large refactor|new subsystem|platform|strategy|rfc|migration plan|refactor plan)"; then
+  if matches "$ARCHITECT_RE"; then
     selected_tier="architect"
+    add_why "tier=architect because prompt matched architecture signals"
   fi
+else
+  add_why "tier forced by CLI: $selected_tier"
 fi
 
 if [[ "$selected_tier" == "architect" ]]; then
   selected_nature="plan"
+  add_why "nature forced to plan because tier=architect"
 fi
 
 if [[ -z "$effort" ]]; then
@@ -290,26 +648,36 @@ fi
 
 if [[ -z "$sandbox" ]]; then
   if [[ "$selected_nature" == "plan" ]]; then
-    sandbox="read-only"
+    sandbox="$PLAN_SANDBOX_DEFAULT"
   else
-    sandbox="workspace-write"
+    sandbox="$IMPL_SANDBOX_DEFAULT"
   fi
+  add_why "sandbox default from nature: $sandbox"
+else
+  add_why "sandbox forced by CLI: $sandbox"
 fi
 
 if [[ -z "$approval" ]]; then
   if [[ "$selected_nature" == "plan" ]]; then
-    approval="never"
+    approval="$PLAN_APPROVAL_DEFAULT"
   else
-    approval="on-request"
+    approval="$IMPL_APPROVAL_DEFAULT"
   fi
+  add_why "approval default from nature: $approval"
+else
+  add_why "approval forced by CLI: $approval"
 fi
 
 selected_search="$search"
 if [[ "$selected_search" == "auto" ]]; then
   selected_search="off"
-  if matches "(latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|docs|documentation|api|openai|stripe|law|regulation|look up|lookup|browse|search|web)"; then
+  add_why "search default: off"
+  if matches "$SEARCH_RE"; then
     selected_search="on"
+    add_why "search=on because prompt matched current-info/search signals"
   fi
+else
+  add_why "search forced by CLI: $selected_search"
 fi
 
 route_line="[smart] tier=$selected_tier nature=$selected_nature model=$model effort=$effort sandbox=$sandbox approval=$approval search=$selected_search"
@@ -364,6 +732,21 @@ quote_cmd() {
 }
 
 echo "$route_line"
+if [[ "$why" -eq 1 ]]; then
+  echo "why:"
+  for line in "${why_lines[@]}"; do
+    echo "  - $line"
+  done
+  if [[ ${#loaded_configs[@]} -gt 0 ]]; then
+    echo "config:"
+    for file in "${loaded_configs[@]}"; do
+      echo "  - $file"
+    done
+  else
+    echo "config: none"
+  fi
+  exit 0
+fi
 echo "cwd=$ROOT_DIR"
 echo "command=$(quote_cmd "${cmd[@]}")"
 
