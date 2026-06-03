@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CODEX_BIN="${CODEX_SMART_CODEX_BIN:-codex}"
+ROOT_DIR="$(pwd -P)"
+
+NANO_MODEL="${CODEX_SMART_NANO_MODEL:-gpt-5.4-mini}"
+LIGHT_MODEL="${CODEX_SMART_LIGHT_MODEL:-gpt-5.4-mini}"
+STANDARD_MODEL="${CODEX_SMART_STANDARD_MODEL:-gpt-5.5}"
+DEEP_MODEL="${CODEX_SMART_DEEP_MODEL:-gpt-5.5}"
+ARCHITECT_MODEL="${CODEX_SMART_ARCHITECT_MODEL:-gpt-5.5}"
+
+action="run"
+dry_run=0
+tier="auto"
+nature="auto"
+model=""
+effort=""
+sandbox=""
+approval=""
+search="auto"
+inject=1
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-smart [options] "task prompt"
+  echo "task prompt" | codex-smart [options]
+  codex-smart exec [options] "task prompt"
+  codex-smart resume [options] [--last|SESSION_ID] ["task prompt"]
+  codex-smart review [options] [codex review options] ["review prompt"]
+
+Short alias after install:
+  csmart [options] "task prompt"
+
+Options:
+  --dry-run                         Show selected settings and command only.
+  --cd DIR                          Use DIR as the Codex workspace root.
+  --tier auto|nano|light|standard|deep|architect
+  --nature auto|plan|impl
+  --model MODEL                     Force an exact Codex model.
+  --effort low|medium|high|xhigh    Force reasoning effort.
+  --sandbox read-only|workspace-write|danger-full-access
+  --approval untrusted|on-request|never|on-failure
+  --search auto|on|off              Use Codex web search for interactive runs.
+  --no-inject                       Do not prepend plan/route instructions.
+  -h, --help                        Show this help.
+
+Default routing:
+  nano       -> gpt-5.4-mini, low       trivial lookup, typo, one-liner
+  light      -> gpt-5.4-mini, medium    small single-file tasks
+  standard   -> gpt-5.5, high           normal coding work
+  deep       -> gpt-5.5, xhigh          hard bugs, security, deploys
+  architect  -> gpt-5.5, xhigh          architecture and large refactors
+
+Nature routing:
+  plan -> read-only sandbox, approval=never
+  impl -> workspace-write sandbox, approval=on-request
+
+Environment model overrides:
+  CODEX_SMART_NANO_MODEL
+  CODEX_SMART_LIGHT_MODEL
+  CODEX_SMART_STANDARD_MODEL
+  CODEX_SMART_DEEP_MODEL
+  CODEX_SMART_ARCHITECT_MODEL
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    exec|e)
+      action="exec"
+      shift
+      ;;
+    resume)
+      action="resume"
+      shift
+      ;;
+    review)
+      action="review"
+      shift
+      ;;
+  esac
+fi
+
+remaining=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --cd|-C)
+      ROOT_DIR="$(cd "${2:?--cd requires a directory}" && pwd -P)"
+      shift 2
+      ;;
+    --tier)
+      tier="${2:-}"
+      shift 2
+      ;;
+    --nature)
+      nature="${2:-}"
+      shift 2
+      ;;
+    --model|-m)
+      model="${2:-}"
+      shift 2
+      ;;
+    --effort)
+      effort="${2:-}"
+      shift 2
+      ;;
+    --sandbox|-s)
+      sandbox="${2:-}"
+      shift 2
+      ;;
+    --approval|--ask-for-approval|-a)
+      approval="${2:-}"
+      shift 2
+      ;;
+    --search)
+      search="${2:-}"
+      shift 2
+      ;;
+    --no-inject)
+      inject=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      remaining+=("$@")
+      break
+      ;;
+    -*)
+      if [[ "$action" == "resume" || "$action" == "review" ]]; then
+        remaining+=("$@")
+        break
+      fi
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      remaining+=("$@")
+      break
+      ;;
+  esac
+done
+
+case "$tier" in
+  auto|nano|light|standard|deep|architect) ;;
+  *)
+    echo "--tier must be auto, nano, light, standard, deep, or architect" >&2
+    exit 2
+    ;;
+esac
+
+case "$nature" in
+  auto|plan|impl) ;;
+  *)
+    echo "--nature must be auto, plan, or impl" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "$effort" ]]; then
+  case "$effort" in
+    low|medium|high|xhigh) ;;
+    *)
+      echo "--effort must be low, medium, high, or xhigh" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "$sandbox" ]]; then
+  case "$sandbox" in
+    read-only|workspace-write|danger-full-access) ;;
+    *)
+      echo "--sandbox must be read-only, workspace-write, or danger-full-access" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "$approval" ]]; then
+  case "$approval" in
+    untrusted|on-request|never|on-failure) ;;
+    *)
+      echo "--approval must be untrusted, on-request, never, or on-failure" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+case "$search" in
+  auto|on|off) ;;
+  *)
+    echo "--search must be auto, on, or off" >&2
+    exit 2
+    ;;
+esac
+
+prompt=""
+if [[ ${#remaining[@]} -gt 0 ]]; then
+  prompt="${remaining[*]}"
+elif [[ "$action" != "resume" && "$action" != "review" && ! -t 0 ]]; then
+  prompt="$(cat)"
+fi
+
+prompt_lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
+
+matches() {
+  [[ "$prompt_lc" =~ $1 ]]
+}
+
+PLAN_RE="(^|[^[:alnum:]_])(explain|review|audit|analy[sz]e|plan|design|document|docs|readme|compare|question|investigate|latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|lookup|browse|search|web)($|[^[:alnum:]_])|what does|what is|why does|how does|how do i|which model|summari[sz]e|look up"
+IMPL_RE="(^|[^[:alnum:]_])(fix|implement|add|change|update|wire|create|build|run|start|test|debug|migrate|deploy|install|package|refactor)($|[^[:alnum:]_])|write code|do that|make it"
+
+selected_nature="$nature"
+if [[ "$selected_nature" == "auto" ]]; then
+  selected_nature="impl"
+
+  if [[ "$action" == "review" ]]; then
+    selected_nature="plan"
+  fi
+
+  if matches "$PLAN_RE" && ! matches "$IMPL_RE"; then
+    selected_nature="plan"
+  fi
+
+  if matches "$IMPL_RE"; then
+    selected_nature="impl"
+  fi
+fi
+
+selected_tier="$tier"
+if [[ "$selected_tier" == "auto" ]]; then
+  selected_tier="standard"
+
+  if [[ "$action" == "review" ]]; then
+    selected_tier="deep"
+  fi
+
+  if matches "(typo|spelling|format|rename|wording|copy text|one-line|one line|simple|quick|trivial)" \
+    && ! matches "(multi-file|multiple files|architecture|security|deploy|production|auth|billing|stripe|database|migration)"; then
+    selected_tier="nano"
+  fi
+
+  if matches "(small|single-file|single file|explain a function|one file)" \
+    && ! matches "(architecture|security|deploy|production|auth|billing|stripe|database|migration|complex|hard)"; then
+    selected_tier="light"
+  fi
+
+  if matches "(hard|complex|fragile|flaky|race|concurrency|security|vulnerab|credential|secret|token|session|auth|login|production|deploy|docker|kubernetes|helm|browser|playwright|automation|supplier|checkout|billing|stripe|database|migration)"; then
+    selected_tier="deep"
+  fi
+
+  if matches "(architecture|architect|system design|design the system|large refactor|new subsystem|platform|strategy|rfc|migration plan|refactor plan)"; then
+    selected_tier="architect"
+  fi
+fi
+
+if [[ "$selected_tier" == "architect" ]]; then
+  selected_nature="plan"
+fi
+
+if [[ -z "$effort" ]]; then
+  case "$selected_tier" in
+    nano) effort="low" ;;
+    light) effort="medium" ;;
+    standard) effort="high" ;;
+    deep|architect) effort="xhigh" ;;
+  esac
+fi
+
+if [[ -z "$model" ]]; then
+  case "$selected_tier" in
+    nano) model="$NANO_MODEL" ;;
+    light) model="$LIGHT_MODEL" ;;
+    standard) model="$STANDARD_MODEL" ;;
+    deep) model="$DEEP_MODEL" ;;
+    architect) model="$ARCHITECT_MODEL" ;;
+  esac
+fi
+
+if [[ -z "$sandbox" ]]; then
+  if [[ "$selected_nature" == "plan" ]]; then
+    sandbox="read-only"
+  else
+    sandbox="workspace-write"
+  fi
+fi
+
+if [[ -z "$approval" ]]; then
+  if [[ "$selected_nature" == "plan" ]]; then
+    approval="never"
+  else
+    approval="on-request"
+  fi
+fi
+
+selected_search="$search"
+if [[ "$selected_search" == "auto" ]]; then
+  selected_search="off"
+  if matches "(latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|docs|documentation|api|openai|stripe|law|regulation|look up|lookup|browse|search|web)"; then
+    selected_search="on"
+  fi
+fi
+
+route_line="[smart] tier=$selected_tier nature=$selected_nature model=$model effort=$effort sandbox=$sandbox approval=$approval search=$selected_search"
+
+final_prompt="$prompt"
+if [[ "$inject" -eq 1 && -n "${prompt//[[:space:]]/}" ]]; then
+  if [[ "$selected_nature" == "plan" ]]; then
+    final_prompt=$'Smart routing selected plan mode. Do not edit files or run write/destructive commands unless the user explicitly asks for implementation in this prompt. Start with the answer, review, analysis, or plan requested.\n\n'"$prompt"
+  else
+    final_prompt=$'Smart routing selected implementation mode. Work end to end: inspect the workspace, make the needed changes, verify them, and report the outcome concisely.\n\n'"$prompt"
+  fi
+fi
+
+cmd=()
+case "$action" in
+  exec)
+    cmd=("$CODEX_BIN" exec --cd "$ROOT_DIR" --model "$model" --sandbox "$sandbox" --ask-for-approval "$approval" -c "model_reasoning_effort=\"$effort\"" -c "plan_mode_reasoning_effort=\"$effort\"")
+    if [[ -n "${final_prompt//[[:space:]]/}" ]]; then
+      cmd+=("$final_prompt")
+    fi
+    ;;
+  resume)
+    cmd=("$CODEX_BIN" resume --model "$model" --sandbox "$sandbox" --ask-for-approval "$approval" -c "model_reasoning_effort=\"$effort\"" -c "plan_mode_reasoning_effort=\"$effort\"")
+    if [[ "$selected_search" == "on" ]]; then
+      cmd+=(--search)
+    fi
+    cmd+=("${remaining[@]}")
+    ;;
+  review)
+    cmd=("$CODEX_BIN" review -c "model=\"$model\"" -c "model_reasoning_effort=\"$effort\"")
+    cmd+=("${remaining[@]}")
+    ;;
+  run)
+    cmd=("$CODEX_BIN" --cd "$ROOT_DIR" --model "$model" --sandbox "$sandbox" --ask-for-approval "$approval" -c "model_reasoning_effort=\"$effort\"" -c "plan_mode_reasoning_effort=\"$effort\"")
+    if [[ "$selected_search" == "on" ]]; then
+      cmd+=(--search)
+    fi
+    if [[ -n "${final_prompt//[[:space:]]/}" ]]; then
+      cmd+=("$final_prompt")
+    fi
+    ;;
+esac
+
+quote_cmd() {
+  local out=""
+  local part
+  for part in "$@"; do
+    printf -v part '%q' "$part"
+    out+="${part} "
+  done
+  printf '%s\n' "${out% }"
+}
+
+echo "$route_line"
+echo "cwd=$ROOT_DIR"
+echo "command=$(quote_cmd "${cmd[@]}")"
+
+if [[ "$action" == "exec" && "$selected_search" == "on" ]]; then
+  echo "note=codex exec does not expose --search in this installed CLI; search was not added"
+fi
+
+if [[ "$dry_run" -eq 1 ]]; then
+  exit 0
+fi
+
+cd "$ROOT_DIR"
+exec "${cmd[@]}"
