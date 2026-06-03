@@ -19,9 +19,10 @@ The installer adds:
 codex-smart
 csmart
 /smart
+/effort
 ```
 
-`csmart` is the short command. `/smart` is a zsh function installed through `~/.zshenv`, so it works in normal Terminal sessions and one-shot zsh commands. This does not replace the existing Claude `smart` alias.
+`csmart` is the short command. `/smart` and `/effort` are zsh functions installed through `~/.zshenv`, so they work in normal Terminal sessions and one-shot zsh commands. This does not replace the existing Claude `smart` alias.
 
 ## Usage
 
@@ -33,6 +34,9 @@ csmart
 /smart config init
 /smart models
 /smart release-check
+/effort ultracode
+/effort status
+/effort off
 csmart "fix the failing tests"
 csmart "explain what this script does"
 csmart exec "summarize this repo"
@@ -54,6 +58,7 @@ Complexity controls model and reasoning effort:
 | standard | `gpt-5.5` | high | Normal implementation work |
 | deep | `gpt-5.5` | xhigh | Hard bugs, auth, security, deploys, automation |
 | architect | `gpt-5.5` | xhigh | Architecture, large refactors, new subsystems |
+| ultracode | `gpt-5.5` | xhigh | Dynamic workflow mode for complex multi-workstream tasks |
 
 Nature controls Codex permissions:
 
@@ -62,7 +67,7 @@ Nature controls Codex permissions:
 | plan | read-only | never | Explain, review, analyze, plan, design, audit |
 | impl | workspace-write | on-request | Implement, fix, build, test, run, deploy |
 
-`architect` always forces `plan`.
+`architect` always forces `plan`. `ultracode` keeps the normal plan/implementation routing, but runs at xhigh and injects instructions that tell Codex to decide whether the task warrants a dynamic workflow.
 
 Every run starts with a line like:
 
@@ -70,9 +75,32 @@ Every run starts with a line like:
 [smart] tier=standard nature=impl model=gpt-5.5 effort=high sandbox=workspace-write approval=on-request search=off
 ```
 
+## Ultracode Effort
+
+Turn on Codex-only ultracode mode:
+
+```bash
+/effort ultracode
+```
+
+After that, `/smart "task"` and `csmart "task"` route through the `ultracode` tier until you disable it:
+
+```bash
+/effort off
+```
+
+In ultracode, Codex runs with xhigh reasoning and decides per task whether a dynamic workflow is worth it. For genuinely complex work, it can act as orchestrator, write a short orchestration brief, use available subagent or parallel-agent tools, merge results, and verify the final outcome. For small edits or simple questions, it should skip the workflow and proceed normally.
+
+One-shot without toggling:
+
+```bash
+csmart --tier ultracode "migrate the auth system and verify release readiness"
+```
+
 ## Overrides
 
 ```bash
+csmart --tier ultracode "debug this cross-module production issue"
 csmart --tier deep "debug this flaky Playwright flow"
 csmart --nature plan "review this migration"
 csmart --model gpt-5.4 --effort medium "small change"
@@ -92,8 +120,10 @@ csmart --why "fix auth bug in production"
 csmart doctor          # check install health
 csmart status          # print status and examples
 csmart models          # list Codex models from `codex debug models`
+csmart effort status   # show ultracode effort state
+csmart effort off      # disable ultracode effort mode
 csmart release-check   # syntax, secrets, git author, and release checks
-csmart uninstall       # remove installed binaries and the managed /smart function
+csmart uninstall       # remove installed binaries and the managed /smart and /effort functions
 ```
 
 The installer also installs a standalone uninstaller:
@@ -126,6 +156,8 @@ LIGHT_MODEL=gpt-5.4-mini
 STANDARD_MODEL=gpt-5.5
 DEEP_MODEL=gpt-5.5
 ARCHITECT_MODEL=gpt-5.5
+ULTRACODE_MODEL=gpt-5.5
+ULTRACODE_SUBAGENT_LIMIT=8
 PLAN_SANDBOX=read-only
 IMPL_SANDBOX=workspace-write
 PLAN_APPROVAL=never
@@ -145,6 +177,7 @@ export CODEX_SMART_LIGHT_MODEL=gpt-5.4-mini
 export CODEX_SMART_STANDARD_MODEL=gpt-5.5
 export CODEX_SMART_DEEP_MODEL=gpt-5.5
 export CODEX_SMART_ARCHITECT_MODEL=gpt-5.5
+export CODEX_SMART_ULTRACODE_MODEL=gpt-5.5
 ```
 
 ## Difference from Claude smart mode
@@ -158,7 +191,7 @@ Codex CLI routing is configured when a session starts or resumes through command
 csmart "your task"
 ```
 
-That is the reliable Codex equivalent of Claude's `/smart task` from Terminal. For an existing Codex session, use:
+That is the reliable Codex equivalent of Claude's `/smart task` from Terminal. Codex-only `/effort ultracode` is implemented by the launcher, not by Claude. For an existing Codex session, use:
 
 ```bash
 /smart resume --last "your task"
@@ -171,6 +204,6 @@ Inside an already-open Codex chat, custom `/smart` slash handling depends on Cod
 ```text
 codex-smart    # launcher
 install.sh     # installs codex-smart and csmart into ~/.local/bin
-uninstall.sh   # removes installed files and the managed /smart function
+uninstall.sh   # removes installed files and the managed /smart and /effort functions
 README.md      # this file
 ```

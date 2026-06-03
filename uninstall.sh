@@ -3,8 +3,6 @@ set -euo pipefail
 
 BIN_DIR="${HOME}/.local/bin"
 ZSH_ENV="${HOME}/.zshenv"
-START="# >>> codex-smart-mode /smart >>>"
-END="# <<< codex-smart-mode /smart <<<"
 
 echo "Uninstalling codex-smart-mode..."
 rm -f "$BIN_DIR/codex-smart" "$BIN_DIR/csmart" "$BIN_DIR/codex-smart-uninstall"
@@ -16,18 +14,21 @@ import sys
 
 p = Path(sys.argv[1])
 text = p.read_text()
-start = "# >>> codex-smart-mode /smart >>>"
-end = "# <<< codex-smart-mode /smart <<<"
+blocks = [
+    ("# >>> codex-smart-mode /smart >>>", "# <<< codex-smart-mode /smart <<<"),
+    ("# >>> codex-smart-mode /effort >>>", "# <<< codex-smart-mode /effort <<<"),
+]
 
-while start in text and end in text:
-    a = text.index(start)
-    b = text.index(end, a) + len(end)
-    if a > 0 and text[a - 1] == "\n":
-        a -= 1
-    text = text[:a] + text[b:]
+for start, end in blocks:
+    while start in text and end in text:
+        a = text.index(start)
+        b = text.index(end, a) + len(end)
+        if a > 0 and text[a - 1] == "\n":
+            a -= 1
+        text = text[:a] + text[b:]
 
 p.write_text(text)
 PY
 fi
 
-echo "Removed codex-smart, csmart, codex-smart-uninstall, and the managed /smart zsh block."
+echo "Removed codex-smart, csmart, codex-smart-uninstall, and the managed /smart and /effort zsh blocks."

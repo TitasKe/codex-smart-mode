@@ -18,6 +18,7 @@ echo "  $BIN_DIR/codex-smart-uninstall"
 
 ZSH_ENV="$HOME/.zshenv"
 SMART_FUNCTION_START="# >>> codex-smart-mode /smart >>>"
+EFFORT_FUNCTION_START="# >>> codex-smart-mode /effort >>>"
 
 if [[ -f "$ZSH_ENV" ]] && grep -q "$SMART_FUNCTION_START" "$ZSH_ENV"; then
   echo "zsh /smart function already exists in $ZSH_ENV"
@@ -31,6 +32,20 @@ function /smart() {
 # <<< codex-smart-mode /smart <<<
 EOF
   echo "Added zsh /smart function to $ZSH_ENV"
+fi
+
+if [[ -f "$ZSH_ENV" ]] && grep -q "$EFFORT_FUNCTION_START" "$ZSH_ENV"; then
+  echo "zsh /effort function already exists in $ZSH_ENV"
+else
+  cat >> "$ZSH_ENV" <<'EOF'
+
+# >>> codex-smart-mode /effort >>>
+function /effort() {
+  "$HOME/.local/bin/csmart" effort "$@"
+}
+# <<< codex-smart-mode /effort <<<
+EOF
+  echo "Added zsh /effort function to $ZSH_ENV"
 fi
 
 case ":$PATH:" in
@@ -51,6 +66,8 @@ echo
 echo "Try:"
 echo "  /smart --dry-run \"fix the failing tests\""
 echo "  /smart \"implement the requested change\""
+echo "  /effort ultracode"
+echo "  /effort status"
 echo "  /smart doctor"
 echo "  csmart --dry-run \"fix the failing tests\""
 echo "  csmart \"implement the requested change\""

@@ -6,12 +6,15 @@ ROOT_DIR="$(pwd -P)"
 CONFIG_DIR="${CODEX_SMART_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/codex-smart}"
 USER_CONFIG="$CONFIG_DIR/config.env"
 PROJECT_CONFIG_NAME=".codex-smart.env"
+EFFORT_STATE_FILE="$CONFIG_DIR/effort.env"
 
 NANO_MODEL="gpt-5.4-mini"
 LIGHT_MODEL="gpt-5.4-mini"
 STANDARD_MODEL="gpt-5.5"
 DEEP_MODEL="gpt-5.5"
 ARCHITECT_MODEL="gpt-5.5"
+ULTRACODE_MODEL="gpt-5.5"
+ULTRACODE_SUBAGENT_LIMIT="8"
 PLAN_SANDBOX_DEFAULT="read-only"
 IMPL_SANDBOX_DEFAULT="workspace-write"
 PLAN_APPROVAL_DEFAULT="never"
@@ -51,6 +54,8 @@ set_config_value() {
     STANDARD_MODEL|CODEX_SMART_STANDARD_MODEL) STANDARD_MODEL="$value" ;;
     DEEP_MODEL|CODEX_SMART_DEEP_MODEL) DEEP_MODEL="$value" ;;
     ARCHITECT_MODEL|CODEX_SMART_ARCHITECT_MODEL) ARCHITECT_MODEL="$value" ;;
+    ULTRACODE_MODEL|CODEX_SMART_ULTRACODE_MODEL) ULTRACODE_MODEL="$value" ;;
+    ULTRACODE_SUBAGENT_LIMIT) ULTRACODE_SUBAGENT_LIMIT="$value" ;;
     PLAN_SANDBOX) PLAN_SANDBOX_DEFAULT="$value" ;;
     IMPL_SANDBOX) IMPL_SANDBOX_DEFAULT="$value" ;;
     PLAN_APPROVAL) PLAN_APPROVAL_DEFAULT="$value" ;;
@@ -93,6 +98,48 @@ apply_environment_overrides() {
   if [[ -n "${CODEX_SMART_STANDARD_MODEL+x}" ]]; then STANDARD_MODEL="$CODEX_SMART_STANDARD_MODEL"; fi
   if [[ -n "${CODEX_SMART_DEEP_MODEL+x}" ]]; then DEEP_MODEL="$CODEX_SMART_DEEP_MODEL"; fi
   if [[ -n "${CODEX_SMART_ARCHITECT_MODEL+x}" ]]; then ARCHITECT_MODEL="$CODEX_SMART_ARCHITECT_MODEL"; fi
+  if [[ -n "${CODEX_SMART_ULTRACODE_MODEL+x}" ]]; then ULTRACODE_MODEL="$CODEX_SMART_ULTRACODE_MODEL"; fi
+}
+
+ultracode_enabled() {
+  [[ -f "$EFFORT_STATE_FILE" ]] && grep -q '^mode=ultracode$' "$EFFORT_STATE_FILE"
+}
+
+ultracode_status() {
+  if ultracode_enabled; then
+    echo ON
+  else
+    echo OFF
+  fi
+}
+
+run_effort() {
+  local sub="${1:-status}"
+  case "$sub" in
+    ultracode|on)
+      mkdir -p "$CONFIG_DIR"
+      if ultracode_enabled; then
+        rm -f "$EFFORT_STATE_FILE"
+        echo "Ultracode OFF"
+      else
+        printf 'mode=ultracode\n' > "$EFFORT_STATE_FILE"
+        echo "Ultracode ON - Codex will run at xhigh and decide when complex tasks warrant a dynamic workflow."
+        echo "Use /effort off to disable it."
+      fi
+      ;;
+    off)
+      rm -f "$EFFORT_STATE_FILE"
+      echo "Ultracode OFF"
+      ;;
+    status)
+      echo "ultracode=$(ultracode_status)"
+      echo "state=$EFFORT_STATE_FILE"
+      ;;
+    *)
+      echo "Usage: codex-smart effort ultracode|off|status" >&2
+      return 2
+      ;;
+  esac
 }
 
 print_status() {
@@ -100,9 +147,11 @@ print_status() {
   echo "  launcher: ${BASH_SOURCE[0]}"
   echo "  codex:    ${CODEX_BIN}"
   echo "  config:   ${USER_CONFIG}"
+  echo "  effort:   ultracode=$(ultracode_status)"
   echo
   echo "Usage:"
   echo "  /smart \"fix the failing tests\""
+  echo "  /effort ultracode"
   echo "  /smart --dry-run \"fix auth bug in production\""
   echo "  /smart --why \"what is the latest Codex model?\""
   echo "  /smart doctor"
@@ -134,6 +183,11 @@ run_doctor() {
     echo "ok   /smart zsh function is available"
   else
     echo "warn /smart zsh function is not loaded; run ./install.sh"
+  fi
+  if zsh -lc 'type /effort' >/dev/null 2>&1; then
+    echo "ok   /effort zsh function is available"
+  else
+    echo "warn /effort zsh function is not loaded; run ./install.sh"
   fi
   if [[ -f "$USER_CONFIG" ]]; then
     echo "ok   user config exists: $USER_CONFIG"
@@ -175,6 +229,8 @@ LIGHT_MODEL=gpt-5.4-mini
 STANDARD_MODEL=gpt-5.5
 DEEP_MODEL=gpt-5.5
 ARCHITECT_MODEL=gpt-5.5
+ULTRACODE_MODEL=gpt-5.5
+ULTRACODE_SUBAGENT_LIMIT=8
 
 PLAN_SANDBOX=read-only
 IMPL_SANDBOX=workspace-write
@@ -280,18 +336,21 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 text = p.read_text()
-start = "# >>> codex-smart-mode /smart >>>"
-end = "# <<< codex-smart-mode /smart <<<"
-while start in text and end in text:
-    a = text.index(start)
-    b = text.index(end, a) + len(end)
-    if a > 0 and text[a - 1] == "\n":
-        a -= 1
-    text = text[:a] + text[b:]
+blocks = [
+    ("# >>> codex-smart-mode /smart >>>", "# <<< codex-smart-mode /smart <<<"),
+    ("# >>> codex-smart-mode /effort >>>", "# <<< codex-smart-mode /effort <<<"),
+]
+for start, end in blocks:
+    while start in text and end in text:
+        a = text.index(start)
+        b = text.index(end, a) + len(end)
+        if a > 0 and text[a - 1] == "\n":
+            a -= 1
+        text = text[:a] + text[b:]
 p.write_text(text)
 PY
   fi
-  echo "Removed codex-smart, csmart, and the managed /smart zsh block."
+  echo "Removed codex-smart, csmart, and the managed /smart and /effort zsh blocks."
 }
 
 usage() {
@@ -304,6 +363,7 @@ Usage:
   codex-smart review [options] [codex review options] ["review prompt"]
   codex-smart doctor
   codex-smart config init|show|path
+  codex-smart effort ultracode|off|status
   codex-smart models
   codex-smart release-check
   codex-smart uninstall
@@ -315,7 +375,7 @@ Options:
   --dry-run                         Show selected settings and command only.
   --why                             Explain route selection and exit.
   --cd DIR                          Use DIR as the Codex workspace root.
-  --tier auto|nano|light|standard|deep|architect
+  --tier auto|nano|light|standard|deep|architect|ultracode
   --nature auto|plan|impl
   --model MODEL                     Force an exact Codex model.
   --effort low|medium|high|xhigh    Force reasoning effort.
@@ -331,6 +391,7 @@ Default routing:
   standard   -> gpt-5.5, high           normal coding work
   deep       -> gpt-5.5, xhigh          hard bugs, security, deploys
   architect  -> gpt-5.5, xhigh          architecture and large refactors
+  ultracode  -> gpt-5.5, xhigh          dynamic workflow if the task warrants it
 
 Nature routing:
   plan -> read-only sandbox, approval=never
@@ -342,6 +403,7 @@ Environment model overrides:
   CODEX_SMART_STANDARD_MODEL
   CODEX_SMART_DEEP_MODEL
   CODEX_SMART_ARCHITECT_MODEL
+  CODEX_SMART_ULTRACODE_MODEL
 EOF
 }
 
@@ -358,6 +420,15 @@ if [[ $# -gt 0 ]]; then
     config)
       shift
       run_config "$@"
+      exit $?
+      ;;
+    effort)
+      shift
+      run_effort "$@"
+      exit $?
+      ;;
+    ultracode)
+      run_effort ultracode
       exit $?
       ;;
     models)
@@ -465,17 +536,17 @@ load_config_file "$ROOT_DIR/$PROJECT_CONFIG_NAME"
 apply_environment_overrides
 
 case "$tier" in
-  auto|nano|light|standard|deep|architect) ;;
+  auto|nano|light|standard|deep|architect|ultracode) ;;
   *)
-    echo "--tier must be auto, nano, light, standard, deep, or architect" >&2
+    echo "--tier must be auto, nano, light, standard, deep, architect, or ultracode" >&2
     exit 2
     ;;
 esac
 
 case "$DEFAULT_TIER" in
-  nano|light|standard|deep|architect) ;;
+  nano|light|standard|deep|architect|ultracode) ;;
   *)
-    echo "DEFAULT_TIER in config must be nano, light, standard, deep, or architect" >&2
+    echo "DEFAULT_TIER in config must be nano, light, standard, deep, architect, or ultracode" >&2
     exit 2
     ;;
 esac
@@ -556,6 +627,7 @@ PLAN_RE="(^|[^[:alnum:]_])(explain|review|audit|analy[sz]e|plan|design|document|
 IMPL_RE="(^|[^[:alnum:]_])(fix|implement|add|change|update|wire|create|build|run|start|test|debug|migrate|deploy|install|package|refactor)($|[^[:alnum:]_])|write code|do that|make it"
 DEEP_RE="(hard|complex|fragile|flaky|race|concurrency|security|vulnerab|credential|secret|token|session|auth|login|production|deploy|docker|kubernetes|helm|browser|playwright|automation|supplier|checkout|billing|stripe|database|migration)"
 ARCHITECT_RE="(architecture|architect|system design|design the system|large refactor|new subsystem|platform|strategy|rfc|migration plan|refactor plan)"
+ULTRACODE_RE="(ultracode|dynamic workflow|subagents|sub-agents|multi-agent|multiagent|parallel workstreams|large fleet|orchestrat)"
 SEARCH_RE="(latest|current|today|yesterday|tomorrow|news|price|pricing|release|version|docs|documentation|api|openai|stripe|law|regulation|look up|lookup|browse|search|web)"
 
 [[ -n "$EXTRA_PLAN_RE" ]] && PLAN_RE="$PLAN_RE|$EXTRA_PLAN_RE"
@@ -563,6 +635,11 @@ SEARCH_RE="(latest|current|today|yesterday|tomorrow|news|price|pricing|release|v
 [[ -n "$EXTRA_DEEP_RE" ]] && DEEP_RE="$DEEP_RE|$EXTRA_DEEP_RE"
 [[ -n "$EXTRA_ARCHITECT_RE" ]] && ARCHITECT_RE="$ARCHITECT_RE|$EXTRA_ARCHITECT_RE"
 [[ -n "$EXTRA_SEARCH_RE" ]] && SEARCH_RE="$SEARCH_RE|$EXTRA_SEARCH_RE"
+
+effort_mode="off"
+if ultracode_enabled; then
+  effort_mode="ultracode"
+fi
 
 selected_nature="$nature"
 if [[ "$selected_nature" == "auto" ]]; then
@@ -618,6 +695,16 @@ if [[ "$selected_tier" == "auto" ]]; then
     selected_tier="architect"
     add_why "tier=architect because prompt matched architecture signals"
   fi
+
+  if matches "$ULTRACODE_RE"; then
+    selected_tier="ultracode"
+    add_why "tier=ultracode because prompt matched dynamic workflow signals"
+  fi
+
+  if [[ "$effort_mode" == "ultracode" ]]; then
+    selected_tier="ultracode"
+    add_why "tier=ultracode because /effort ultracode is enabled"
+  fi
 else
   add_why "tier forced by CLI: $selected_tier"
 fi
@@ -632,7 +719,7 @@ if [[ -z "$effort" ]]; then
     nano) effort="low" ;;
     light) effort="medium" ;;
     standard) effort="high" ;;
-    deep|architect) effort="xhigh" ;;
+    deep|architect|ultracode) effort="xhigh" ;;
   esac
 fi
 
@@ -643,6 +730,7 @@ if [[ -z "$model" ]]; then
     standard) model="$STANDARD_MODEL" ;;
     deep) model="$DEEP_MODEL" ;;
     architect) model="$ARCHITECT_MODEL" ;;
+    ultracode) model="$ULTRACODE_MODEL" ;;
   esac
 fi
 
@@ -680,14 +768,24 @@ else
   add_why "search forced by CLI: $selected_search"
 fi
 
-route_line="[smart] tier=$selected_tier nature=$selected_nature model=$model effort=$effort sandbox=$sandbox approval=$approval search=$selected_search"
+dynamic_workflow="no"
+if [[ "$selected_tier" == "ultracode" ]]; then
+  dynamic_workflow="auto"
+fi
+
+route_line="[smart] tier=$selected_tier nature=$selected_nature model=$model effort=$effort sandbox=$sandbox approval=$approval search=$selected_search dynamic_workflow=$dynamic_workflow"
 
 final_prompt="$prompt"
 if [[ "$inject" -eq 1 && -n "${prompt//[[:space:]]/}" ]]; then
+  route_prompt=""
+  if [[ "$selected_tier" == "ultracode" ]]; then
+    route_prompt=$'Ultracode effort selected. Run at xhigh reasoning. Before doing the task, decide whether a dynamic workflow is warranted. Use it only for complex, multi-workstream work. If warranted, act as the orchestrator: write a concise orchestration brief, split work into focused streams, use available subagent or parallel-agent tools when present, keep the fleet at '"$ULTRACODE_SUBAGENT_LIMIT"$' agents or fewer unless the user asks otherwise, merge the results yourself, implement the final answer or changes, and verify end to end. If not warranted, proceed normally without forced delegation. Start with one line: [ultracode] dynamic_workflow=yes|no agents=N reason=...\n\n'
+  fi
+
   if [[ "$selected_nature" == "plan" ]]; then
-    final_prompt=$'Smart routing selected plan mode. Do not edit files or run write/destructive commands unless the user explicitly asks for implementation in this prompt. Start with the answer, review, analysis, or plan requested.\n\n'"$prompt"
+    final_prompt="${route_prompt}"$'Smart routing selected plan mode. Do not edit files or run write/destructive commands unless the user explicitly asks for implementation in this prompt. Start with the answer, review, analysis, or plan requested.\n\n'"$prompt"
   else
-    final_prompt=$'Smart routing selected implementation mode. Work end to end: inspect the workspace, make the needed changes, verify them, and report the outcome concisely.\n\n'"$prompt"
+    final_prompt="${route_prompt}"$'Smart routing selected implementation mode. Work end to end: inspect the workspace, make the needed changes, verify them, and report the outcome concisely.\n\n'"$prompt"
   fi
 fi
 
